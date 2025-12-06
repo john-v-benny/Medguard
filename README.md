@@ -105,7 +105,7 @@ Or configure Streamlit secrets at `.streamlit/secrets.toml`:
 GEMINI_API_KEY = "your_gemini_api_key_here"
 ```
 
-5. ### Running the Application
+5. **Running the Application**
 
 
 ```bash
@@ -113,7 +113,7 @@ cd backend
  uvicorn main:app --reload  
 
 ```
-4. **Set up environment variables**
+   
 Open a new terminal
 
 ```
