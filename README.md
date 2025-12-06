@@ -89,7 +89,9 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 3. **Install dependencies**
 ```bash
-pip install -r requirements.txt
+
+pip install google-generativeai python-dotenv seaborn matplotlib scikit-learn fastapi uvicorn pandas numpy 
+
 ```
 
 4. **Set up environment variables**
@@ -103,17 +105,24 @@ Or configure Streamlit secrets at `.streamlit/secrets.toml`:
 GEMINI_API_KEY = "your_gemini_api_key_here"
 ```
 
-### Running the Application
+5. ### Running the Application
 
-**Option 1: Web Interface (Recommended)**
+
 ```bash
-cd streamlit_app
-streamlit run app.py
+cd backend
+ uvicorn main:app --reload  
+
+```
+4. **Set up environment variables**
+Open a new terminal
+
 ```
 
-**Option 2: Jupyter Notebook (Model Training)**
-```bash
-jupyter notebook bayesian_5000.ipynb
+cd frontend
+cd my-app
+npm install
+npm run dev
+
 ```
 
 ## 📈 Model Performance
