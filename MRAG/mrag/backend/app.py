@@ -23,10 +23,32 @@ def health():
 
 @app.post("/mrag")
 def mrag(req: MRAGRequest):
-    print("Symptoms received:", req.symptoms)
-    print("Bayesian predictions:", req.bayesian_output)
+    print("=" * 60)
+    print("🔍 DIAGNOSTIC EXPLANATION REQUEST")
+    print("=" * 60)
+    print(f"Symptoms: {req.symptoms}")
+    print(f"Bayesian Model Output: {req.bayesian_output}")
+    
+    # Get top prediction
+    top_disease = None
+    confidence = 0
+    if req.bayesian_output:
+        top_disease = max(req.bayesian_output, key=req.bayesian_output.get)
+        confidence = req.bayesian_output[top_disease]
+        print(f"Top Prediction: {top_disease} ({confidence:.2%} confidence)")
+    
+    # Generate diagnostic reasoning explanation
     explanation = mrag_explain(
         symptoms=req.symptoms,
         bayesian_output=req.bayesian_output
     )
-    return {"explanation": explanation}
+    
+    print("✅ Explanation generated successfully")
+    print("=" * 60)
+    
+    return {
+        "explanation": explanation,
+        "top_disease": top_disease,
+        "confidence": confidence,
+        "all_predictions": req.bayesian_output
+    }
