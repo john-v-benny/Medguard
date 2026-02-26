@@ -1,0 +1,17 @@
+Metric,Score
+Testing Accuracy,0.9451 (94.51%)
+Average Confidence,0.9736 (97.36%)
+,
+Test Precision (Macro),0.9255 (92.55%)
+Test Recall (Macro),0.9451 (94.51%)
+Test F1-Score (Macro),0.9304 (93.04%)
+,
+Test Precision (Weighted),0.9255 (92.55%)
+Test Recall (Weighted),0.9451 (94.51%)
+Test F1-Score (Weighted),0.9304 (93.04%)
+,
+Cohen's Kappa (Test),0.9437
+,
+Total Test Samples,492
+Correct Predictions,465
+Misclassifications,27
