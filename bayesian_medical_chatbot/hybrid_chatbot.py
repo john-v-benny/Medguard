@@ -72,7 +72,7 @@ class HybridMedicalChatbot:
         
         # Initialize Gemini API
         genai.configure(api_key=gemini_api_key)
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+        self.model = genai.GenerativeModel('gemma-3-27b-it')  # Updated to latest model
         print("[OK] Gemini API initialized\n")
         
         # Create symptom list for Gemini

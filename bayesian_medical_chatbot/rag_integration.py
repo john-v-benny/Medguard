@@ -160,6 +160,18 @@ class MedicalRAG:
                 )
                 result['nli_verification'] = verification
                 print(f"[RAG] Verification: {verification['summary']}")
+                
+                # NEW: Atomic verification with citations
+                context_text = f"Disease: {disease_info['disease']}\nDescription: {disease_info['description']}\nSymptoms: {disease_info['symptoms']}"
+                
+                # Verify symptoms (Hypothesis: Disease is characterized by Symptom)
+                symptom_claims = [f"{disease} is characterized by {s.replace('_', ' ')}" for s in symptoms]
+                result['verified_symptoms'] = self.nli_verifier.verify_claims_against_context(symptom_claims, context_text)
+                
+                # Verify explanation (Break into atomic claims first)
+                explanation_claims = self.nli_verifier._extract_atomic_claims(explanation)
+                result['verified_explanation'] = self.nli_verifier.verify_claims_against_context(explanation_claims, context_text)
+                
             except Exception as e:
                 print(f"[WARNING] NLI verification failed: {e}")
         

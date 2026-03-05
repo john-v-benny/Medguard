@@ -1,0 +1,42 @@
+Disease,Precision,Recall,F1-Score,Support
+(vertigo) Paroymsal  Positional Vertigo,1.0,1.0,1.0,12
+AIDS,1.0,1.0,1.0,12
+Acne,1.0,1.0,1.0,12
+Alcoholic hepatitis,1.0,1.0,1.0,12
+Allergy,1.0,1.0,1.0,12
+Arthritis,1.0,1.0,1.0,12
+Bronchial Asthma,1.0,1.0,1.0,12
+Cervical spondylosis,1.0,1.0,1.0,12
+Chicken pox,1.0,1.0,1.0,12
+Common Cold,1.0,1.0,1.0,12
+Dengue,1.0,1.0,1.0,12
+Diabetes ,1.0,1.0,1.0,12
+Dimorphic hemmorhoids(piles),1.0,1.0,1.0,12
+Fungal infection,1.0,1.0,1.0,12
+Drug Reaction,1.0,1.0,1.0,12
+GERD,1.0,1.0,1.0,12
+Gastroenteritis,1.0,1.0,1.0,12
+Hypertension ,1.0,1.0,1.0,12
+Hepatitis B,1.0,1.0,1.0,12
+Hyperthyroidism,1.0,1.0,1.0,12
+Malaria,1.0,1.0,1.0,12
+Jaundice,1.0,1.0,1.0,12
+Impetigo,1.0,1.0,1.0,12
+Hypothyroidism,1.0,1.0,1.0,12
+Hypoglycemia,1.0,1.0,1.0,12
+Peptic ulcer diseae,1.0,1.0,1.0,12
+Pneumonia,1.0,1.0,1.0,12
+Psoriasis,1.0,1.0,1.0,12
+Typhoid,1.0,1.0,1.0,12
+Varicose veins,1.0,1.0,1.0,12
+Migraine,1.0,1.0,1.0,12
+Osteoarthristis,1.0,1.0,1.0,12
+Paralysis (brain hemorrhage),1.0,1.0,1.0,12
+hepatitis A,1.0,1.0,1.0,12
+Urinary tract infection,1.0,1.0,1.0,12
+Hepatitis C,1.0,0.9166666666666666,0.9565217391304348,12
+Chronic cholestasis,1.0,0.8333333333333334,0.9090909090909091,12
+Tuberculosis,0.5,1.0,0.6666666666666666,12
+Hepatitis E,0.4444444444444444,1.0,0.6153846153846154,12
+Hepatitis D,0.0,0.0,0.0,12
+Heart attack,0.0,0.0,0.0,12

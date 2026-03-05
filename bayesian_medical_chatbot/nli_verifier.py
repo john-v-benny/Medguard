@@ -141,7 +141,7 @@ Respond with valid JSON only (no markdown, no code blocks):
         
         # Create hypothesis from disease description
         # Extract first 200 chars of description for focused check
-        desc_short = disease_description[:200] if len(disease_description) > 200 else disease_description
+        desc_short = disease_description[:2000] if len(disease_description) > 2000 else disease_description
         hypothesis = f"{disease} is characterized by: {desc_short}"
         
         result = self._nli_check(premise, hypothesis)
@@ -174,7 +174,7 @@ Respond with valid JSON only (no markdown, no code blocks):
         premise = f"Patient has been diagnosed with {disease}"
         
         # Extract first 200 chars of treatment plan
-        treatment_short = treatment_plan[:200] if len(treatment_plan) > 200 else treatment_plan
+        treatment_short = treatment_plan[:2000] if len(treatment_plan) > 2000 else treatment_plan
         hypothesis = f"Appropriate treatment includes: {treatment_short}"
         
         result = self._nli_check(premise, hypothesis)
@@ -210,7 +210,7 @@ Respond with valid JSON only (no markdown, no code blocks):
         premise = f"Patient has {disease} with symptoms including: {symptom_text}"
         
         # Extract first 200 chars of medications
-        meds_short = medications[:200] if len(medications) > 200 else medications
+        meds_short = medications[:2000] if len(medications) > 2000 else medications
         hypothesis = f"Safe and appropriate medications include: {meds_short}"
         
         result = self._nli_check(premise, hypothesis)
@@ -242,8 +242,8 @@ Respond with valid JSON only (no markdown, no code blocks):
         
         # Check if treatment contradicts disease description
         if 'description' in disease_info and 'treatment' in disease_info:
-            desc = disease_info['description'][:200]
-            treatment = disease_info['treatment'][:200]
+            desc = disease_info['description'][:2000]
+            treatment = disease_info['treatment'][:2000]
             
             result = self._nli_check(
                 premise=f"Disease description: {desc}",
@@ -260,8 +260,8 @@ Respond with valid JSON only (no markdown, no code blocks):
         
         # Check if medications contradict disease type
         if 'description' in disease_info and 'medications' in disease_info:
-            desc = disease_info['description'][:200]
-            meds = disease_info['medications'][:200]
+            desc = disease_info['description'][:2000]
+            meds = disease_info['medications'][:2000]
             
             result = self._nli_check(
                 premise=f"Disease description: {desc}",
@@ -380,3 +380,196 @@ Respond with valid JSON only (no markdown, no code blocks):
             return "⚠️ Limited verification, consult healthcare provider"
         else:
             return "❌ Information needs manual review by medical professional"
+
+    def verify_and_correct_response(self, response_text: str, context_text: str) -> Dict:
+        """
+        Verifies a generated response against the retrieved context by:
+        1. Breaking response into atomic claims
+        2. Verifying each claim against context (entailment check)
+        3. Regenerating if contradictions or lack of proof are found
+        
+        Args:
+            response_text: The generated answer to verify
+            context_text: The source context (RAG retrieval)
+            
+        Returns:
+            Dict containing verified/corrected response and metadata
+        """
+        print(f"\n[NLI] Verifying response against context...")
+        
+        # 1. Extract atomic claims
+        claims = self._extract_atomic_claims(response_text)
+        if not claims:
+            print("[NLI] No claims extracted.")
+            return {"verified_response": response_text, "was_corrected": False, "failed_claims": []}
+            
+        # 2. Verify each claim
+        verified_claims = []
+        failed_claims = []
+        
+        for claim in claims:
+            # We use the context as the premise and the claim as the hypothesis
+            result = self._nli_check(premise=context_text, hypothesis=claim)
+            
+            # Strict check: Must be ENTAILMENT with high confidence
+            if result['label'] == 'ENTAILMENT' and result['confidence'] > 0.7:
+                verified_claims.append(claim)
+            else:
+                print(f"[NLI] Claim failed: '{claim}' ({result['label']})")
+                failed_claims.append({
+                    'claim': claim,
+                    'reason': result['label'],
+                    'reasoning': result['reasoning']
+                })
+        
+        # 3. Regenerate if needed
+        if failed_claims:
+            print(f"[NLI] Found {len(failed_claims)} unsupported claims. Regenerating...")
+            corrected_response = self._regenerate_response(response_text, context_text, failed_claims)
+            return {
+                "verified_response": corrected_response,
+                "was_corrected": True,
+                "failed_claims": failed_claims,
+                "original_response": response_text
+            }
+        
+        print("[NLI] Response fully verified.")
+        return {
+            "verified_response": response_text,
+            "was_corrected": False,
+            "failed_claims": []
+        }
+
+    def _extract_atomic_claims(self, text: str) -> List[str]:
+        """Extract atomic claims from text using Gemini."""
+        prompt = f"""You are a precise text analyzer.
+Task: Break the following text into a list of atomic, independent factual claims.
+Rules:
+1. Each claim must be a single, standalone fact.
+2. Ignore conversational filler (e.g., "Here is the info", "I hope this helps").
+3. Preserve exact medical details (dosages, names, conditions).
+4. Output valid JSON list of strings ONLY.
+
+Text: "{text}"
+
+JSON Output:"""
+        
+        try:
+            response = self.model.generate_content(prompt)
+            text_resp = response.text.strip()
+            
+            # Clean markdown
+            if "```json" in text_resp:
+                text_resp = text_resp.split("```json")[1].split("```")[0].strip()
+            elif "```" in text_resp:
+                text_resp = text_resp.split("```")[1].strip()
+                
+            return json.loads(text_resp)
+        except Exception as e:
+            print(f"[ERROR] Claim extraction failed: {e}")
+            # Fallback: split by sentences
+            return [s.strip() for s in text.split('.') if len(s.strip()) > 10]
+
+    def _regenerate_response(self, original_response: str, context: str, failed_claims: List[Dict]) -> str:
+        """Regenerate response excluding unsupported claims."""
+        
+        failures_text = "\n".join([f"- Claim: '{f['claim']}' (Issue: {f['reason']})" for f in failed_claims])
+        
+        prompt = f"""You are a medical AI assistant acting as a safety filter.
+
+Task: Rewrite the Original Response to be strictly accurate based on the provided Context.
+
+Context (True Source):
+{context}
+
+Original Response:
+{original_response}
+
+Verification Issues (False/Unproven Claims):
+{failures_text}
+
+Instructions:
+1. Rewrite the response to convey the correct information from the Context.
+2. REMOVE or CORRECT any claims flagged as False/Unproven.
+3. Do NOT include information not present in the Context.
+4. Maintain a helpful, professional tone.
+
+Corrected Response:"""
+
+        try:
+            response = self.model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            print(f"[ERROR] Regeneration failed: {e}")
+            return "Unable to verify and regenerate response. Please consult a healthcare professional."
+
+    def verify_statement_with_citation(self, statement: str, context: str) -> dict:
+        """
+        Verify a statement against context and extract supporting quote.
+        """
+        prompt = f"""You are a medical fact-checker.
+Task: Verify if the Statement is supported by the Context.
+If supported (Entailment), extract the EXACT text segment from the Context that supports it.
+
+Context: "{context}"
+Statement: "{statement}"
+
+Respond with valid JSON only:
+{{
+    "is_supported": true,
+    "confidence": 0.95,
+    "supporting_quote": "exact text substring from context",
+    "reasoning": "brief explanation"
+}}
+If not supported, set is_supported to false and supporting_quote to null.
+"""
+        try:
+            response = self.model.generate_content(prompt)
+            text = response.text.strip()
+            
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].strip()
+            
+            return json.loads(text)
+        except Exception as e:
+            print(f"[ERROR] Citation check failed: {e}")
+            return {"is_supported": False, "confidence": 0.0, "supporting_quote": None}
+
+    def verify_claims_against_context(self, claims: List[str], context: str) -> Dict:
+        """
+        Verify a list of claims against context and return evidence.
+        """
+        verified_items = []
+        evidence = {}
+        citation_idx = 1
+        
+        for claim in claims:
+            res = self.verify_statement_with_citation(claim, context)
+            
+            # Check if supported and high confidence
+            is_supported = res.get("is_supported", False) and res.get("confidence", 0) > 0.7
+            quote = res.get("supporting_quote")
+            
+            # If quote is missing or empty, mark as not supported for citation purposes
+            if is_supported and not quote:
+                is_supported = False
+            
+            item = {
+                "claim": claim,
+                "is_supported": is_supported,
+                "citation_id": None
+            }
+            
+            if is_supported:
+                item["citation_id"] = citation_idx
+                evidence[citation_idx] = {
+                    "quote": quote,
+                    "reasoning": res.get("reasoning", "")
+                }
+                citation_idx += 1
+            
+            verified_items.append(item)
+            
+        return {"items": verified_items, "evidence": evidence}
