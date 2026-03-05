@@ -1,6 +1,7 @@
 """
 Streamlit Web UI for Hybrid Medical Chatbot
 Combines Bayesian Network (hallucination-free predictions) with Gemini API (natural language)
+Features Dynamic Conversational Symptom Elicitation
 """
 
 import streamlit as st
@@ -134,20 +135,73 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize session state
+# Initialize session state (Added Dynamic Chat States)
 if 'chatbot' not in st.session_state:
     st.session_state.chatbot = None
 if 'diagnosis_history' not in st.session_state:
     st.session_state.diagnosis_history = []
 if 'current_result' not in st.session_state:
     st.session_state.current_result = None
-if 'followup_answers' not in st.session_state:
-    st.session_state.followup_answers = {}
-if 'current_symptoms' not in st.session_state:
-    st.session_state.current_symptoms = {}
-if 'user_input_text' not in st.session_state:
-    st.session_state.user_input_text = ""
+if 'chat_messages' not in st.session_state:
+    st.session_state.chat_messages = [{"role": "assistant", "content": "🩺 How can I help you today? Describe how you're feeling in plain English. (Type **'done'** to force diagnosis early)"}]
+if 'collected_symptoms' not in st.session_state:
+    st.session_state.collected_symptoms = {}
+if 'diagnosis_complete' not in st.session_state:
+    st.session_state.diagnosis_complete = False
 
+# Dynamic LLM Elicitation Functions
+def parse_symptoms_with_llm(user_text, symptom_cols, api_key):
+    """Uses Gemini to extract symptoms from natural language and map them strictly to the database column names."""
+    if not api_key: 
+        return []
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            'gemini-2.5-flash-lite', 
+            generation_config={"response_mime_type": "application/json", "temperature": 0.1}
+        )
+        prompt = f"""
+        You are a medical data parser. 
+        The user said: "{user_text}"
+        
+        Here is the exact list of valid symptom variables in our database:
+        {', '.join(symptom_cols)}
+        
+        Extract the symptoms the user is describing and map them strictly to the exact variable names above.
+        Return ONLY a valid JSON list of strings representing the matched variables. 
+        If no symptoms match, return an empty list [].
+        """
+        response = model.generate_content(prompt)
+        matched_symptoms = json.loads(response.text.strip())
+        return [sym for sym in matched_symptoms if sym in symptom_cols]
+    except Exception as e:
+        print(f"Parsing error: {e}")
+        return []
+
+def generate_follow_up_question(top_predictions, current_symptoms, api_key):
+    """Uses Gemini to look at the top predicted diseases and ask the user if they have specific symptoms."""
+    if not api_key: 
+        return "Are you experiencing any other symptoms?"
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.5-flash-lite', generation_config={"temperature": 0.4})
+        top_disease_names = [d[0] for d in top_predictions]
+        prompt = f"""
+        You are an empathetic medical assistant chatbot. 
+        The patient has currently reported these symptoms: {', '.join(current_symptoms)}.
+        
+        Based on our Bayesian Network, the top suspected diseases are: {', '.join(top_disease_names)}.
+        
+        Ask a brief, conversational follow-up question inquiring if the patient is experiencing 
+        any other specific symptoms related to these suspected diseases to help us narrow it down. 
+        Do not list the diseases to the patient, just ask about the symptoms. Keep it to one short sentence.
+        """
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        return "Are you experiencing any other symptoms?"
+
+# NLI and RAG Functions
 def fetch_live_website_context(url):
     """Scrapes a live URL and extracts paragraph and bullet-point text cleanly."""
     if not url:
@@ -167,14 +221,9 @@ def fetch_live_website_context(url):
             if len(text) > 15: 
                 valid_text_blocks.append(text)
                 
-        # Join with double newlines to preserve paragraph structure
         full_text = "\n\n".join(valid_text_blocks)
-        
-        # Strip out the US Gov website boilerplate
         boilerplate_pattern = r"An official website of the United States government.*?Share sensitive information only on official, secure websites"
         clean_text = re.sub(boilerplate_pattern, "", full_text, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Cleanup any excessive spacing caused by the strip
         clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
         
         return clean_text[:15000] 
@@ -295,11 +344,11 @@ def enrich_with_nli(result, api_key):
     result['used_nli_context'] = rag_context
     result['structured_context'] = structured_context
     
-    # 1. Clean Symptom Claims (Just the symptom name)
+    # Clean Symptom Claims
     symptoms = result.get('symptoms', [])
     symptom_claims = [s.replace('_', ' ').title() for s in symptoms] if symptoms else []
     
-    # 2. Clean Explanation Claims (Remove ** markdown before splitting)
+    # Clean Explanation Claims
     explanation_str = result.get('rag_explanation', result.get('explanation', ''))
     if explanation_str:
         explanation_str = explanation_str.replace('**', '')
@@ -350,12 +399,11 @@ def enrich_with_nli(result, api_key):
     return result
 
 def render_interactive_nli_ui(categorized_nli, structured_context, source_url):
-    """Renders a custom HTML/JS split-pane for interactive bidirectional highlighting with grouped categories."""
+    """Renders a custom HTML/JS split-pane for interactive bidirectional highlighting."""
     if not categorized_nli:
         st.info("No statements to verify.")
         return
 
-    # Prepare Context HTML - Note how \n is safely converted to <br> to preserve paragraph spacing
     premise_html = ""
     for section_title, content in structured_context.items():
         if content and content.strip():
@@ -437,7 +485,7 @@ def render_interactive_nli_ui(categorized_nli, structured_context, source_url):
         }}
     </style>
 
-    <div class="instruction">👆 Click any sentence on the left to locate its supporting evidence on the right. Unverified claims have been filtered out for safety.</div>
+    <div class="instruction">👆 Click any sentence on the left to locate its supporting evidence on the right.</div>
     
     <div class="nli-container">
         <div class="pane" id="hypothesis-pane">
@@ -464,7 +512,6 @@ def render_interactive_nli_ui(categorized_nli, structured_context, source_url):
         const originalContextHTML = contextContainer.innerHTML;
 
         for (const [category, items] of Object.entries(categorizedData)) {{
-            // Filter out items with Low entailment
             const validItems = items.filter(item => item.entailment_score !== 'Low');
             
             if (validItems.length > 0) {{
@@ -626,9 +673,9 @@ with st.sidebar:
     
     **How it works:**
     1. Describe your symptoms naturally
-    2. AI extracts symptoms from your text
-    3. Bayesian Network predicts diseases
-    4. Get results with confidence scores
+    2. AI asks dynamic follow-up questions
+    3. Bayesian Network evaluates probabilities
+    4. Explanations show after high confidence is reached
     """)
     
     st.divider()
@@ -641,9 +688,12 @@ with st.sidebar:
     
     st.divider()
     
-    if st.button("🗑️ Clear History", width='stretch'):
+    if st.button("🗑️ Clear History & Restart", width='stretch'):
         st.session_state.diagnosis_history = []
         st.session_state.current_result = None
+        st.session_state.chat_messages = [{"role": "assistant", "content": "🩺 How can I help you today? Describe how you're feeling in plain English. (Type **'done'** to force diagnosis early)"}]
+        st.session_state.collected_symptoms = {}
+        st.session_state.diagnosis_complete = False
         st.rerun()
 
 # Initialize chatbot
@@ -653,66 +703,145 @@ if st.session_state.chatbot is None:
 
 # Main content
 if st.session_state.chatbot:
-    st.markdown('<div class="section-header">💬 Step 1: Describe Your Symptoms</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">💬 Step 1: Dynamic Symptom Assessment</div>', unsafe_allow_html=True)
     
-    st.info("📝 **How to use:** Describe your symptoms in plain English. The AI will automatically extract and analyze them.")
-    
-    with st.expander("💡 See Example Symptoms"):
-        st.markdown("""
-        **Example 1:** "I have a high fever, severe headache, and I've been vomiting. I also have chills and muscle pain."
-        
-        **Example 2:** "I'm experiencing increased thirst, frequent urination, and constant fatigue."
-        
-        **Example 3:** "I have a persistent cough, runny nose, and sore throat for the past 3 days."
-        """)
-    
-    user_input = st.text_area(
-        "Enter your symptoms here:",
-        placeholder="Example: I have a high fever, severe headache, and I've been vomiting...",
-        height=120,
-        key="symptom_input",
-        help="Be as specific as possible about your symptoms"
-    )
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        diagnose_button = st.button(
-            "🔍 Analyze Symptoms",
-            type="primary",
-            width='stretch',
-            disabled=not user_input.strip()
-        )
-    
-    st.divider()
-    
-    if diagnose_button and user_input.strip():
-        with st.status("🩺 Processing Medical Diagnosis...", expanded=True) as status:
-            try:
-                st.write("Analyzing symptoms and predicting diseases...")
-                result = st.session_state.chatbot.diagnose(user_input)
-                
-                st.write("Performing Batched Context NLI Verification...")
-                api_key = os.getenv('GEMINI_API_KEY')
-                result = enrich_with_nli(result, api_key)
-                
-                st.session_state.current_result = result
-                
-                if result.get('symptoms'):
-                    st.session_state.current_symptoms = {s: 1 for s in result['symptoms']}
-                
-                st.session_state.followup_answers = {}
-                
-                st.session_state.diagnosis_history.append({
-                    'input': user_input,
-                    'result': result
-                })
-                status.update(label="Diagnosis Complete!", state="complete", expanded=False)
-            except Exception as e:
-                status.update(label="Diagnosis Failed", state="error", expanded=False)
-                st.error(f"Error during diagnosis: {e}")
-                
-    # Display results
-    if st.session_state.current_result:
+    # -------------------------------------------------------------
+    # Interactive Chat Loop for Dynamic Symptom Elicitation
+    # -------------------------------------------------------------
+    for msg in st.session_state.chat_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if not st.session_state.diagnosis_complete:
+        if prompt := st.chat_input("Type your symptoms here (or 'done' to finish)..."):
+            st.session_state.chat_messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Analyzing response..."):
+                    api_key = os.getenv('GEMINI_API_KEY')
+                    if not api_key:
+                        st.error("⚠️ GEMINI_API_KEY is required to process symptoms.")
+                        st.stop()
+
+                    # Handle forcing diagnosis
+                    if prompt.lower().strip() in ['quit', 'exit', 'done']:
+                        if not st.session_state.collected_symptoms:
+                            msg = "No symptoms collected yet. Please describe your symptoms first."
+                            st.markdown(msg)
+                            st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                            st.rerun()
+                        else:
+                            force_complete = True
+                            new_syms = []
+                    else:
+                        force_complete = False
+                        new_syms = parse_symptoms_with_llm(prompt, st.session_state.chatbot.symptom_cols, api_key)
+
+                    # Ensure the AI recognized something
+                    if not force_complete and not new_syms and not st.session_state.collected_symptoms:
+                        msg = "I couldn't map that to specific medical symptoms. Could you describe your symptoms differently?"
+                        st.markdown(msg)
+                        st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                    
+                    else:
+                        for sym in new_syms:
+                            st.session_state.collected_symptoms[sym] = 1
+
+                        tracked_list = list(st.session_state.collected_symptoms.keys())
+                        
+                        if tracked_list:
+                            st.info(f"📋 **Tracked symptoms:** {', '.join(tracked_list).replace('_', ' ').title()}")
+                            
+                            # Run Bayesian Network Prediction
+                            predictions = st.session_state.chatbot.predict_disease(st.session_state.collected_symptoms, top_n=5)
+                            
+                            if predictions and len(predictions) > 0:
+                                top_prob = predictions[0][1]
+                                top_disease = predictions[0][0]
+                                
+                                # Check threshold or force completion
+                                if top_prob >= 0.85 or force_complete:
+                                    if force_complete:
+                                        msg = f"Generating final explanation based on collected symptoms. Top prediction: {top_disease} ({top_prob*100:.1f}%)"
+                                    else:
+                                        msg = f"✅ High confidence reached ({top_prob*100:.1f}% for {top_disease}). Generating final explanation..."
+                                    
+                                    st.markdown(msg)
+                                    st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                                    st.write("Compiling final report and verifying with NLI...")
+
+                                    # Only provide the explanation here (after full confidence)
+                                    explanation = st.session_state.chatbot.explain_results(predictions, tracked_list)
+                                    
+                                    # Fetch RAG Context if available
+                                    rag_info = None
+                                    if hasattr(st.session_state.chatbot, 'use_rag') and st.session_state.chatbot.use_rag and hasattr(st.session_state.chatbot, 'rag') and st.session_state.chatbot.rag:
+                                        try:
+                                            rag_info = st.session_state.chatbot.rag.explain_diagnosis(
+                                                disease=top_disease,
+                                                confidence=top_prob,
+                                                symptoms=tracked_list
+                                            )
+                                        except Exception as e:
+                                            st.warning(f"Could not retrieve detailed medical information: {e}")
+
+                                    # Build Final Output Data
+                                    final_result = {
+                                        'symptoms': tracked_list,
+                                        'predictions': predictions,
+                                        'explanation': explanation,
+                                        'requires_followup': False,
+                                        'followup_questions': [],
+                                        'confidence': top_prob,
+                                        'low_confidence_warning': top_prob < getattr(st.session_state.chatbot, 'MINIMUM_CONFIDENCE', 0.1)
+                                    }
+                                    
+                                    if rag_info:
+                                        final_result.update({
+                                            'rag_explanation': rag_info.get('explanation', ''),
+                                            'treatment_plan': rag_info.get('treatment_plan', ''),
+                                            'medications': rag_info.get('medications', ''),
+                                            'next_steps': rag_info.get('next_steps', ''),
+                                            'prevention': rag_info.get('prevention', ''),
+                                            'source_url': rag_info.get('source_url', ''),
+                                            'source_name': rag_info.get('source_name', ''),
+                                            'disease_description': rag_info.get('disease_description', ''),
+                                            'complications': rag_info.get('complications', '')
+                                        })
+                                        if 'nli_verification' in rag_info:
+                                            final_result['nli_verification'] = rag_info['nli_verification']
+                                            
+                                    # Enrich result payload with Natural Language Inference Checks
+                                    final_result = enrich_with_nli(final_result, api_key)
+                                    
+                                    st.session_state.current_result = final_result
+                                    st.session_state.diagnosis_history.append({
+                                        'input': "Dynamic Chat Session (" + ", ".join(tracked_list).replace("_", " ") + ")",
+                                        'result': final_result
+                                    })
+                                    
+                                    st.session_state.diagnosis_complete = True
+                                    st.rerun()
+
+                                else:
+                                    # Confidence is too low, ask follow up question dynamically
+                                    follow_up = generate_follow_up_question(predictions, tracked_list, api_key)
+                                    pred_info = f"\n\n*Current top suspicion: {top_disease} ({top_prob*100:.1f}%)*"
+                                    full_msg = f"{follow_up}{pred_info}"
+                                    
+                                    st.markdown(full_msg)
+                                    st.session_state.chat_messages.append({"role": "assistant", "content": full_msg})
+                            else:
+                                msg = "I'm having trouble diagnosing with these symptoms. Please provide more details."
+                                st.markdown(msg)
+                                st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                                
+    # -------------------------------------------------------------
+    # Display Results ONLY if Diagnosis is Complete
+    # -------------------------------------------------------------
+    if st.session_state.current_result and st.session_state.diagnosis_complete:
         result = st.session_state.current_result
         
         st.divider()
@@ -721,10 +850,7 @@ if st.session_state.chatbot:
         if result['symptoms']:
             display_symptoms(result['symptoms'])
             st.markdown("")
-        else:
-            st.warning("⚠️ No symptoms were identified from your description. Please be more specific.")
-        
-        # SAFE RESPONSE STRATEGY: Always show predictions with appropriate warnings
+            
         if result.get('low_confidence_warning'):
             st.error("""
             ⚠️ **CRITICAL: LOW CONFIDENCE PREDICTION**
@@ -732,14 +858,12 @@ if st.session_state.chatbot:
             The predictions below have very low confidence and may not be accurate.
             **MEDICAL CONSULTATION IS REQUIRED** - Do not rely on these predictions alone.
             """)
-            
             st.markdown(result.get('explanation', ''))
             
             if result.get('predictions'):
                 st.divider()
                 st.subheader("⚠️ Low Confidence Possibilities")
                 st.caption("These are statistical possibilities only - NOT a diagnosis")
-                
                 for i, (disease, prob) in enumerate(result['predictions'][:3], 1):
                     st.warning(f"**{i}. {disease}** - {prob*100:.1f}% probability (LOW CONFIDENCE)")
             
@@ -747,7 +871,6 @@ if st.session_state.chatbot:
             if 'treatment_plan' in result or 'structured_context' in result:
                 st.divider()
                 st.info("📚 **Additional Medical Information** (for reference only - consult a doctor)")
-                
                 tab_disease = st.tabs(["🔬 Disease Data"])[0]
                 with tab_disease:
                     categorized_nli = {
@@ -758,84 +881,11 @@ if st.session_state.chatbot:
                     source_url = result.get('source_url', '#')
                     render_interactive_nli_ui(categorized_nli, structured_context, source_url)
             
-            if result.get('followup_questions'):
-                st.divider()
-                st.markdown("### 🔍 Optional: Answer Questions to Refine Prediction")
-                st.caption("*Note: Even with more information, medical consultation is still required*")
-                
-                for i, q in enumerate(result['followup_questions']):
-                    symptom = q['symptom']
-                    question = q['question']
-                    
-                    st.markdown(f"**{i+1}. {question}**")
-                    
-                    col1, col2, col3 = st.columns([1, 1, 4])
-                    
-                    with col1:
-                        if st.button("✅ Yes", key=f"yes_{symptom}_low"):
-                            st.session_state.followup_answers[symptom] = 1
-                            st.rerun()
-                    
-                    with col2:
-                        if st.button("❌ No", key=f"no_{symptom}_low"):
-                            st.session_state.followup_answers[symptom] = 0
-                            st.rerun()
-                    
-                    with col3:
-                        if symptom in st.session_state.followup_answers:
-                            answer = "Yes" if st.session_state.followup_answers[symptom] == 1 else "No"
-                            st.markdown(f"*Answer: {answer}*")
-                
-                if st.session_state.followup_answers:
-                    st.divider()
-                    if st.button("🔄 Update Prediction with Answers", type="primary", use_container_width=True, key="update_low_conf"):
-                        with st.status("🔄 Updating prediction...", expanded=True) as status:
-                            try:
-                                st.write("Re-evaluating symptom data...")
-                                all_symptoms = st.session_state.current_symptoms.copy()
-                                all_symptoms.update(st.session_state.followup_answers)
-                                
-                                predictions = st.session_state.chatbot.predict_disease(all_symptoms, top_n=5)
-                                
-                                if predictions and len(predictions) > 0:
-                                    symptom_list = [s for s, v in all_symptoms.items() if v == 1]
-                                    explanation = st.session_state.chatbot.explain_results(predictions, symptom_list)
-                                    new_confidence = predictions[0][1]
-                                    
-                                    updated_result = {
-                                        'symptoms': symptom_list,
-                                        'predictions': predictions,
-                                        'explanation': explanation,
-                                        'requires_followup': new_confidence < st.session_state.chatbot.FOLLOWUP_THRESHOLD,
-                                        'followup_questions': [],
-                                        'confidence': new_confidence,
-                                        'low_confidence_warning': new_confidence < st.session_state.chatbot.MINIMUM_CONFIDENCE
-                                    }
-                                    
-                                    st.write("Performing Batched Context NLI Verification...")
-                                    api_key = os.getenv('GEMINI_API_KEY')
-                                    updated_result = enrich_with_nli(updated_result, api_key)
-                                    
-                                    st.success(f"✅ Prediction updated! Confidence: {new_confidence*100:.1f}%")
-                                    
-                                    st.session_state.current_result = updated_result
-                                    st.session_state.followup_answers = {}
-                                    status.update(label="Update Complete", state="complete", expanded=False)
-                                    st.rerun()
-                                else:
-                                    st.warning("⚠️ Unable to Generate Prediction. Please consult a professional.")
-                                    status.update(label="Failed to predict", state="error", expanded=False)
-                            except Exception as e:
-                                st.error(f"Error updating prediction: {str(e)}")
-                                status.update(label="Error processing", state="error", expanded=False)
-            
             st.divider()
             st.error("""
             🚨 **MANDATORY MEDICAL CONSULTATION REQUIRED**
-            
             This is an AI-based educational tool with LOW CONFIDENCE in this prediction. 
             **You MUST consult a qualified healthcare provider** for proper diagnosis and treatment.
-            Do NOT make any medical decisions based on this information alone.
             """)
         
         elif result.get('predictions') and len(result['predictions']) > 0:
@@ -885,7 +935,6 @@ if st.session_state.chatbot:
             
             if 'nli_verification' in result:
                 st.markdown("---")
-                
                 st.markdown("""
                 <div style="
                     background: linear-gradient(135deg, #E8F5E9 0%, #C8E6C9 100%);
@@ -938,12 +987,7 @@ if st.session_state.chatbot:
                             {score_percentage}%
                         </span>
                     </div>
-                    <div style="
-                        background: #f0f0f0;
-                        border-radius: 10px;
-                        height: 20px;
-                        overflow: hidden;
-                    ">
+                    <div style="background: #f0f0f0; border-radius: 10px; height: 20px; overflow: hidden;">
                         <div style="
                             background: linear-gradient(90deg, {score_color}, {score_color}dd);
                             width: {score_percentage}%;
@@ -953,15 +997,7 @@ if st.session_state.chatbot:
                         "></div>
                     </div>
                     <div style="margin-top: 0.5rem; text-align: center;">
-                        <span style="
-                            display: inline-block;
-                            background: {score_color}22;
-                            color: {score_color};
-                            padding: 0.3rem 1rem;
-                            border-radius: 15px;
-                            font-weight: 600;
-                            font-size: 0.85rem;
-                        ">
+                        <span style="display: inline-block; background: {score_color}22; color: {score_color}; padding: 0.3rem 1rem; border-radius: 15px; font-weight: 600; font-size: 0.85rem;">
                             {score_label}
                         </span>
                     </div>
@@ -981,171 +1017,57 @@ if st.session_state.chatbot:
                 with col1:
                     symptom_check = verification['symptom_match']
                     if symptom_check['verified']:
-                        card_bg = "#E8F5E9"
-                        card_border = "#4CAF50"
-                        status_text = "✅ Verified"
-                        status_color = "#2E7D32"
+                        card_bg, card_border, status_text, status_color = "#E8F5E9", "#4CAF50", "✅ Verified", "#2E7D32"
                     else:
-                        card_bg = "#FFF3E0"
-                        card_border = "#FF9800"
-                        status_text = "⚠️ Review Needed"
-                        status_color = "#E65100"
+                        card_bg, card_border, status_text, status_color = "#FFF3E0", "#FF9800", "⚠️ Review Needed", "#E65100"
                     
                     st.markdown(f"""
-                    <div style="
-                        background: {card_bg};
-                        padding: 1rem;
-                        border-radius: 10px;
-                        border-left: 4px solid {card_border};
-                        margin-bottom: 1rem;
-                        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
-                    ">
+                    <div style="background: {card_bg}; padding: 1rem; border-radius: 10px; border-left: 4px solid {card_border}; margin-bottom: 1rem; box-shadow: 0 2px 6px rgba(0,0,0,0.08);">
                         <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">🩺</div>
                         <div style="font-weight: 600; color: #333; margin-bottom: 0.5rem;">Symptom Match</div>
-                        <div style="
-                            font-weight: 700;
-                            color: {status_color};
-                            font-size: 0.95rem;
-                            margin-bottom: 0.5rem;
-                        ">
-                            {status_text}
-                        </div>
-                        <div style="
-                            background: white;
-                            padding: 0.4rem 0.6rem;
-                            border-radius: 5px;
-                            font-size: 0.85rem;
-                            color: #666;
-                            margin-bottom: 0.5rem;
-                        ">
-                            Confidence: {int(symptom_check['confidence']*100)}%
-                        </div>
-                        <div style="
-                            background: white;
-                            padding: 0.4rem 0.6rem;
-                            border-radius: 5px;
-                            font-size: 0.8rem;
-                            color: #666;
-                        ">
-                            <strong>Status:</strong> {symptom_check['label']}
-                        </div>
+                        <div style="font-weight: 700; color: {status_color}; font-size: 0.95rem; margin-bottom: 0.5rem;">{status_text}</div>
+                        <div style="background: white; padding: 0.4rem 0.6rem; border-radius: 5px; font-size: 0.85rem; color: #666; margin-bottom: 0.5rem;">Confidence: {int(symptom_check['confidence']*100)}%</div>
+                        <div style="background: white; padding: 0.4rem 0.6rem; border-radius: 5px; font-size: 0.8rem; color: #666;"><strong>Status:</strong> {symptom_check['label']}</div>
                     </div>
                     """, unsafe_allow_html=True)
-                    
                     with st.expander("📖 View Reasoning"):
                         st.write(symptom_check['reasoning'])
                 
                 with col2:
                     treatment_check = verification['treatment_check']
                     if treatment_check['verified']:
-                        card_bg = "#E8F5E9"
-                        card_border = "#4CAF50"
-                        status_text = "✅ Appropriate"
-                        status_color = "#2E7D32"
+                        card_bg, card_border, status_text, status_color = "#E8F5E9", "#4CAF50", "✅ Appropriate", "#2E7D32"
                     else:
-                        card_bg = "#FFF3E0"
-                        card_border = "#FF9800"
-                        status_text = "⚠️ Review Needed"
-                        status_color = "#E65100"
+                        card_bg, card_border, status_text, status_color = "#FFF3E0", "#FF9800", "⚠️ Review Needed", "#E65100"
                     
                     st.markdown(f"""
-                    <div style="
-                        background: {card_bg};
-                        padding: 1rem;
-                        border-radius: 10px;
-                        border-left: 4px solid {card_border};
-                        margin-bottom: 1rem;
-                        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
-                    ">
+                    <div style="background: {card_bg}; padding: 1rem; border-radius: 10px; border-left: 4px solid {card_border}; margin-bottom: 1rem; box-shadow: 0 2px 6px rgba(0,0,0,0.08);">
                         <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">💊</div>
                         <div style="font-weight: 600; color: #333; margin-bottom: 0.5rem;">Treatment Plan</div>
-                        <div style="
-                            font-weight: 700;
-                            color: {status_color};
-                            font-size: 0.95rem;
-                            margin-bottom: 0.5rem;
-                        ">
-                            {status_text}
-                        </div>
-                        <div style="
-                            background: white;
-                            padding: 0.4rem 0.6rem;
-                            border-radius: 5px;
-                            font-size: 0.85rem;
-                            color: #666;
-                            margin-bottom: 0.5rem;
-                        ">
-                            Confidence: {int(treatment_check['confidence']*100)}%
-                        </div>
-                        <div style="
-                            background: white;
-                            padding: 0.4rem 0.6rem;
-                            border-radius: 5px;
-                            font-size: 0.8rem;
-                            color: #666;
-                        ">
-                            <strong>Status:</strong> {treatment_check['label']}
-                        </div>
+                        <div style="font-weight: 700; color: {status_color}; font-size: 0.95rem; margin-bottom: 0.5rem;">{status_text}</div>
+                        <div style="background: white; padding: 0.4rem 0.6rem; border-radius: 5px; font-size: 0.85rem; color: #666; margin-bottom: 0.5rem;">Confidence: {int(treatment_check['confidence']*100)}%</div>
+                        <div style="background: white; padding: 0.4rem 0.6rem; border-radius: 5px; font-size: 0.8rem; color: #666;"><strong>Status:</strong> {treatment_check['label']}</div>
                     </div>
                     """, unsafe_allow_html=True)
-                    
                     with st.expander("📖 View Reasoning"):
                         st.write(treatment_check['reasoning'])
                 
                 with col3:
                     medication_check = verification['medication_check']
                     if medication_check['verified']:
-                        card_bg = "#E8F5E9"
-                        card_border = "#4CAF50"
-                        status_text = "✅ Safe"
-                        status_color = "#2E7D32"
+                        card_bg, card_border, status_text, status_color = "#E8F5E9", "#4CAF50", "✅ Safe", "#2E7D32"
                     else:
-                        card_bg = "#FFF3E0"
-                        card_border = "#FF9800"
-                        status_text = "⚠️ Consult Doctor"
-                        status_color = "#E65100"
+                        card_bg, card_border, status_text, status_color = "#FFF3E0", "#FF9800", "⚠️ Consult Doctor", "#E65100"
                     
                     st.markdown(f"""
-                    <div style="
-                        background: {card_bg};
-                        padding: 1rem;
-                        border-radius: 10px;
-                        border-left: 4px solid {card_border};
-                        margin-bottom: 1rem;
-                        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
-                    ">
+                    <div style="background: {card_bg}; padding: 1rem; border-radius: 10px; border-left: 4px solid {card_border}; margin-bottom: 1rem; box-shadow: 0 2px 6px rgba(0,0,0,0.08);">
                         <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">💉</div>
                         <div style="font-weight: 600; color: #333; margin-bottom: 0.5rem;">Medication Safety</div>
-                        <div style="
-                            font-weight: 700;
-                            color: {status_color};
-                            font-size: 0.95rem;
-                            margin-bottom: 0.5rem;
-                        ">
-                            {status_text}
-                        </div>
-                        <div style="
-                            background: white;
-                            padding: 0.4rem 0.6rem;
-                            border-radius: 5px;
-                            font-size: 0.85rem;
-                            color: #666;
-                            margin-bottom: 0.5rem;
-                        ">
-                            Confidence: {int(medication_check['confidence']*100)}%
-                        </div>
-                        <div style="
-                            background: white;
-                            padding: 0.4rem 0.6rem;
-                            border-radius: 5px;
-                            font-size: 0.8rem;
-                            color: #666;
-                        ">
-                            <strong>Status:</strong> {medication_check['label']}
-                        </div>
+                        <div style="font-weight: 700; color: {status_color}; font-size: 0.95rem; margin-bottom: 0.5rem;">{status_text}</div>
+                        <div style="background: white; padding: 0.4rem 0.6rem; border-radius: 5px; font-size: 0.85rem; color: #666; margin-bottom: 0.5rem;">Confidence: {int(medication_check['confidence']*100)}%</div>
+                        <div style="background: white; padding: 0.4rem 0.6rem; border-radius: 5px; font-size: 0.8rem; color: #666;"><strong>Status:</strong> {medication_check['label']}</div>
                     </div>
                     """, unsafe_allow_html=True)
-                    
                     with st.expander("📖 View Reasoning"):
                         st.write(medication_check['reasoning'])
                 
@@ -1154,13 +1076,7 @@ if st.session_state.chatbot:
                     st.error("🚨 **Contradictions Detected in Medical Information**")
                     for i, contradiction in enumerate(verification['contradictions'], 1):
                         st.markdown(f"""
-                        <div style="
-                            background: #FFEBEE;
-                            padding: 1rem;
-                            border-radius: 8px;
-                            border-left: 4px solid #F44336;
-                            margin: 0.5rem 0;
-                        ">
+                        <div style="background: #FFEBEE; padding: 1rem; border-radius: 8px; border-left: 4px solid #F44336; margin: 0.5rem 0;">
                             <strong>Contradiction {i}:</strong> {contradiction['type']}<br>
                             <span style="color: #666; font-size: 0.9rem;">{contradiction['details']}</span><br>
                             <span style="color: #999; font-size: 0.85rem;">Confidence: {int(contradiction.get('confidence', 0)*100)}%</span>
@@ -1169,31 +1085,20 @@ if st.session_state.chatbot:
                 
                 st.info("""
                 **ℹ️ About NLI Verification:**
-                
-                Natural Language Inference (NLI) is an AI technique that verifies the logical consistency between:
-                - Your symptoms and the predicted disease description
-                - The disease and recommended treatments
-                - The condition and suggested medications
-                
-                This helps ensure the information provided is accurate and consistent with medical knowledge.
+                Natural Language Inference (NLI) is an AI technique that verifies the logical consistency between your symptoms and descriptions, treatments, and suggested medications to ensure accuracy.
                 """)
-                
                 st.markdown("---")
             
             has_rag = 'treatment_plan' in result or 'structured_context' in result
             st.markdown("### 📑 Detailed Information")
             
             if has_rag:
-                tab1, tab_disease = st.tabs([
-                    "📊 All Predictions", 
-                    "🔬 Disease Data"
-                ])
+                tab1, tab_disease = st.tabs(["📊 All Predictions", "🔬 Disease Data"])
                 
                 with tab1:
                     st.markdown("#### Probability Distribution")
                     fig = create_probability_chart(result['predictions'])
                     st.plotly_chart(fig, width='stretch')
-                    
                     st.markdown("#### All Predictions")
                     display_predictions(result['predictions'])
                     
@@ -1207,163 +1112,33 @@ if st.session_state.chatbot:
                     render_interactive_nli_ui(categorized_nli, structured_context, source_url)
             else:
                 tab1, tab_explanation = st.tabs(["📊 Predictions", "💬 Explanation"])
-                
                 with tab1:
                     st.markdown("#### Probability Distribution")
                     fig = create_probability_chart(result['predictions'])
                     st.plotly_chart(fig, width='stretch')
                     st.markdown("#### All Predictions")
                     display_predictions(result['predictions'])
-                
                 with tab_explanation:
                     st.info(result['explanation'])
 
-            if result.get('requires_followup') and result.get('followup_questions'):
-                st.divider()
-                st.markdown("### 🔍 Improve Prediction Accuracy")
-                
-                if top_prob < 0.50:
-                    st.warning(f"""
-                    ⚠️ **Medium-Low Confidence ({top_prob*100:.1f}%)**
-                    
-                    The current prediction has medium-low confidence. Answering the questions below 
-                    can help improve the accuracy of the diagnosis.
-                    """)
-                else:
-                    st.info(f"""
-                    📊 **Confidence: {top_prob*100:.1f}%**
-                    
-                    You can optionally answer these questions to further refine the prediction.
-                    """)
-                
-                for i, q in enumerate(result['followup_questions']):
-                    symptom = q['symptom']
-                    question = q['question']
-                    
-                    st.markdown(f"**{i+1}. {question}**")
-                    
-                    col1, col2, col3 = st.columns([1, 1, 4])
-                    
-                    with col1:
-                        if st.button("✅ Yes", key=f"yes_{symptom}_normal"):
-                            st.session_state.followup_answers[symptom] = 1
-                            st.rerun()
-                    
-                    with col2:
-                        if st.button("❌ No", key=f"no_{symptom}_normal"):
-                            st.session_state.followup_answers[symptom] = 0
-                            st.rerun()
-                    
-                    with col3:
-                        if symptom in st.session_state.followup_answers:
-                            answer = "Yes" if st.session_state.followup_answers[symptom] == 1 else "No"
-                            st.markdown(f"*Answer: {answer}*")
-                    
-                    st.markdown("")
-                
-                if st.session_state.followup_answers:
-                    st.divider()
-                    if st.button("🔄 Update Prediction with Answers", type="primary", width='stretch', key="update_normal_conf"):
-                        with st.status("🔄 Updating prediction...", expanded=True) as status:
-                            try:
-                                st.write("Re-evaluating symptoms with new answers...")
-                                all_symptoms = st.session_state.current_symptoms.copy()
-                                all_symptoms.update(st.session_state.followup_answers)
-                                
-                                predictions = st.session_state.chatbot.predict_disease(all_symptoms, top_n=5)
-                                
-                                if predictions and len(predictions) > 0:
-                                    symptom_list = [s for s, v in all_symptoms.items() if v == 1]
-                                    explanation = st.session_state.chatbot.explain_results(predictions, symptom_list)
-                                    
-                                    new_confidence = predictions[0][1]
-                                    top_disease = predictions[0][0]
-                                    
-                                    rag_info = None
-                                    if st.session_state.chatbot.use_rag and hasattr(st.session_state.chatbot, 'rag') and st.session_state.chatbot.rag:
-                                        try:
-                                            rag_info = st.session_state.chatbot.rag.explain_diagnosis(
-                                                disease=top_disease,
-                                                confidence=new_confidence,
-                                                symptoms=symptom_list
-                                            )
-                                        except Exception as e:
-                                            st.warning(f"Could not retrieve detailed medical information: {e}")
-                                    
-                                    updated_result = {
-                                        'symptoms': symptom_list,
-                                        'predictions': predictions,
-                                        'explanation': explanation,
-                                        'requires_followup': new_confidence < st.session_state.chatbot.FOLLOWUP_THRESHOLD,
-                                        'followup_questions': [],
-                                        'confidence': new_confidence,
-                                        'low_confidence_warning': new_confidence < st.session_state.chatbot.MINIMUM_CONFIDENCE
-                                    }
-                                    
-                                    if rag_info:
-                                        updated_result.update({
-                                            'rag_explanation': rag_info['explanation'],
-                                            'treatment_plan': rag_info['treatment_plan'],
-                                            'medications': rag_info['medications'],
-                                            'next_steps': rag_info['next_steps'],
-                                            'prevention': rag_info['prevention'],
-                                            'source_url': rag_info['source_url'],
-                                            'source_name': rag_info['source_name'],
-                                            'disease_description': rag_info['disease_description'],
-                                            'complications': rag_info['complications']
-                                        })
-                                        
-                                        if 'nli_verification' in rag_info:
-                                            updated_result['nli_verification'] = rag_info['nli_verification']
-                                    
-                                    st.write("Performing Batched Context NLI Verification...")
-                                    api_key = os.getenv('GEMINI_API_KEY')
-                                    updated_result = enrich_with_nli(updated_result, api_key)
-                                    
-                                    st.success(f"✅ Prediction updated! New confidence: {new_confidence*100:.1f}%")
-                                    
-                                    st.session_state.current_result = updated_result
-                                    st.session_state.current_symptoms = all_symptoms
-                                    st.session_state.followup_answers = {}
-                                    status.update(label="Update Complete", state="complete", expanded=False)
-                                    st.rerun()
-                                else:
-                                    st.warning("""
-                                    ⚠️ **Unable to Generate Prediction**
-                                    
-                                    The symptom combination is unusual. Please consult a healthcare professional for proper diagnosis.
-                                    """)
-                                    status.update(label="Prediction Failed", state="error", expanded=False)
-                            
-                            except Exception as e:
-                                st.error(f"Error updating prediction: {str(e)}")
-                                status.update(label="Error processing", state="error", expanded=False)
-            
             st.divider()
             st.warning("""
             ⚠️ **MEDICAL DISCLAIMER**
-            
-            This is an AI-based educational tool and NOT a substitute for professional medical advice, 
-            diagnosis, or treatment. Always consult a qualified healthcare provider for any medical 
-            concerns or before making health-related decisions.
+            This is an AI-based educational tool and NOT a substitute for professional medical advice, diagnosis, or treatment. Always consult a qualified healthcare provider for any medical concerns.
             """)
-        
         else:
             st.error("⚠️ **Unable to Make Prediction**")
             st.warning("""
             This symptom combination is not well-represented in the training data. 
             The model cannot make a reliable prediction for these symptoms.
-            
             **Please consult a healthcare professional for proper diagnosis.**
             """)
-            
             if result.get('explanation'):
                 st.info(result['explanation'])
     
     if st.session_state.diagnosis_history:
         st.divider()
         st.header("📜 Diagnosis History")
-        
         with st.expander(f"View {len(st.session_state.diagnosis_history)} previous diagnoses"):
             for i, item in enumerate(reversed(st.session_state.diagnosis_history), 1):
                 st.markdown(f"**#{len(st.session_state.diagnosis_history) - i + 1}:** {item['input'][:100]}...")
