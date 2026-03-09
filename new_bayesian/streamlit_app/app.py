@@ -79,7 +79,7 @@ with st.sidebar:
         display_value = f"{value:.1f}" if isinstance(value, float) else "Not provided"
         st.markdown(f"- {status} **{feature}**: `{display_value}`")
     st.divider()
-    if st.button("🔄 Start Over", use_container_width=True):
+    if st.button("🔄 Start Over", width='stretch'):
         for key in ["messages", "collected", "pending_symptom", "final_result"]:
             st.session_state.pop(key, None)
         st.rerun()
@@ -110,7 +110,7 @@ if st.session_state.final_result:
         # Display probability chart
         prob_df = pd.DataFrame(list(res["all_probabilities"].items()), columns=["Disease", "Probability"]).sort_values("Probability", ascending=True)
         fig = px.bar(prob_df, x="Probability", y="Disease", orientation="h", text=prob_df["Probability"].map(lambda p: f"{p:.1%}"), title="Probability Distribution Across Conditions")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         # Display heatmap explanation
         try:
@@ -132,7 +132,7 @@ elif st.session_state.pending_symptom:
     else:
         val = st.slider(f"{symptom} Severity (0-10)", 0.0, 10.0, 5.0, 0.5, key=f"widget_{symptom}")
 
-    if st.button(f"Submit {symptom} Value", use_container_width=True):
+    if st.button(f"Submit {symptom} Value", width='stretch'):
         # Update state with submitted value
         st.session_state.collected[symptom] = float(val)
         human_readable_val = f"{val}°F" if symptom == "Fever" else f"{val}/10"
