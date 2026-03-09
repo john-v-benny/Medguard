@@ -13,8 +13,11 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+
+# NEW SDK IMPORTS
+from google import genai
+from google.genai import types
+
 import plotly.graph_objects as go
 from pgmpy.models import DiscreteBayesianNetwork
 from pgmpy.estimators import MaximumLikelihoodEstimator
@@ -53,7 +56,6 @@ st.markdown("""
 def initialize_bayesian_network():
     """Loads dataset and trains the Discrete Bayesian Network."""
     try:
-        # Adjust path to your dataset location
         data_path = 'data/Training_binary.csv' 
         if not os.path.exists(data_path):
             data_path = '../data/Training_binary.csv'
@@ -107,17 +109,13 @@ def explain_prediction_str(model, symptoms_dict, predicted_disease):
     return explanation
 
 # -------------------------------------------------------------
-# Dynamic LLM Elicitation & RAG Functions
+# Dynamic LLM Elicitation & RAG Functions (Updated SDK)
 # -------------------------------------------------------------
 def parse_symptoms_with_llm(user_text, symptom_cols, api_key):
-    """Extracts binary symptoms mapping directly to network states."""
+    """Extracts binary symptoms mapping directly to network states (DEBUG VERSION)."""
     if not api_key: return {}
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            'gemini-2.5-flash-lite', 
-            generation_config={"response_mime_type": "application/json", "temperature": 0.1}
-        )
+        client = genai.Client(api_key=api_key)
         prompt = f"""
         You are a medical data extractor. 
         User input: "{user_text}"
@@ -128,21 +126,65 @@ def parse_symptoms_with_llm(user_text, symptom_cols, api_key):
         - If they HAVE it, map to 1. 
         - If they explicitly say they DON'T have it (negation), map to 0.
         
-        Return ONLY a JSON object: {{"variable_name": 1, "variable_name": 0}}. 
-        If none match, return {{}}.
+        CRITICAL INSTRUCTIONS:
+        1. You MUST ONLY use the exact string names from the 'Valid variables' list above.
+        2. Do not change spelling, spacing, or punctuation (keep underscores if they exist).
+        3. Return ONLY a flat JSON object: {{"exact_variable_name": 1, "another_exact_name": 0}}. 
+        4. If none match, return {{}}.
         """
-        response = model.generate_content(prompt)
-        data = json.loads(response.text.strip())
-        return {k: v for k, v in data.items() if k in symptom_cols}
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json", 
+                temperature=0.1
+            )
+        )
+        
+        # DEBUG: Let's see if the prompt was blocked by safety filters
+        if not response.candidates or not response.candidates[0].content:
+            st.error("🚨 Debug: The Gemini API blocked the response (likely due to safety filters on medical text).")
+            return {}
+
+        raw_text = response.text.strip()
+        
+        # DEBUG: Show exactly what the LLM returned before parsing
+        st.info(f"🕵️ Debug - Raw LLM Output: \n{raw_text}")
+
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[7:]
+        if raw_text.startswith("```"):
+            raw_text = raw_text[3:]
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-3]
+            
+        data = json.loads(raw_text.strip())
+        
+        # DEBUG: Show what JSON recognized
+        st.info(f"🕵️ Debug - Parsed JSON: {data}")
+        
+        cleaned_data = {}
+        for k, v in data.items():
+            if k in symptom_cols:
+                cleaned_data[k] = v
+            elif k.replace(" ", "_") in symptom_cols:
+                cleaned_data[k.replace(" ", "_")] = v
+                
+        # DEBUG: Check if we lost the data during the mapping phase
+        if data and not cleaned_data:
+            st.error(f"🚨 Debug: LLM returned data {data}, but none of the keys matched your dataset's columns!")
+
+        return cleaned_data
+        
     except Exception as e:
-        print(f"Parsing error: {e}")
+        # THIS unhides the silent crashes
+        st.error(f"🚨 Debug - Python Error in parse_symptoms: {str(e)}")
         return {}
 
 def generate_follow_up_question(top_predictions, current_symptoms, api_key):
     if not api_key: return "Are you experiencing any other symptoms?"
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.5-flash-lite', generation_config={"temperature": 0.4})
+        client = genai.Client(api_key=api_key)
         top_disease_names = [d[0] for d in top_predictions]
         prompt = f"""
         You are an empathetic medical assistant chatbot. 
@@ -154,7 +196,11 @@ def generate_follow_up_question(top_predictions, current_symptoms, api_key):
         any other specific symptoms related to these suspected diseases to help us narrow it down. 
         Do not list the diseases to the patient, just ask about the symptoms. Keep it to one short sentence.
         """
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.4)
+        )
         return response.text.strip()
     except Exception:
         return "Are you experiencing any other symptoms?"
@@ -163,10 +209,7 @@ def generate_rag_context(disease, api_key):
     """Simulates RAG retrieval to provide context for NLI verification."""
     if not api_key: return {}
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
-        
-        # FIX: Explicitly forcing flat strings in the prompt schema to prevent TypeErrors
+        client = genai.Client(api_key=api_key)
         prompt = f"""
         Provide detailed medical context for the disease: {disease}.
         Return ONLY a valid JSON object with these exact keys.
@@ -180,14 +223,18 @@ def generate_rag_context(disease, api_key):
         }}
         Make the content factual and structured like a trusted medical encyclopedia.
         """
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
         return json.loads(response.text.strip())
     except Exception as e:
         print(f"RAG Error: {e}")
         return {}
 
 # -------------------------------------------------------------
-# NLI Functions 
+# NLI Functions (Updated SDK & Restored Context Verification)
 # -------------------------------------------------------------
 def fetch_live_website_context(url):
     if not url: return ""
@@ -207,8 +254,7 @@ def fetch_live_website_context(url):
 def verify_claims_against_context(claims_list, context, api_key):
     if not claims_list or not context or not api_key: return []
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.5-flash-lite', generation_config={"response_mime_type": "application/json", "temperature": 0.1})
+        client = genai.Client(api_key=api_key)
         claims_str = json.dumps(claims_list)
         prompt = f"""
         You are a rigorous medical verification system.
@@ -231,7 +277,14 @@ def verify_claims_against_context(claims_list, context, api_key):
             }}
         ]
         """
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1
+            )
+        )
         return json.loads(response.text.strip())
     except Exception as e:
         return [{"statement": f"Verification Failed: {e}", "entailment_score": "Low", "context": "Error", "highlighted_context": ""}]
@@ -244,20 +297,18 @@ def enrich_with_nli(result, api_key):
         rag_context = live_context
         structured_context["Website Reference"] = live_context
     else:
-        # FIX: Type check and safely convert dictionary/list values to strings to prevent join() crashes
         keys_to_extract = ['disease_description', 'treatment_plan', 'medications', 'prevention', 'next_steps']
         safe_parts = []
         
         for k in keys_to_extract:
             val = result.get(k, '')
             if isinstance(val, (dict, list)):
-                val = json.dumps(val) # Convert rogue JSON objects to string
+                val = json.dumps(val) 
             if val:
                 safe_parts.append(str(val))
                 
         rag_context = "\n\n".join(safe_parts)
         
-        # Build structured context safely
         display_keys = ['Disease Overview', 'Treatment Plan', 'Medications', 'Prevention', 'Next Steps']
         for d_key, k in zip(display_keys, keys_to_extract):
             val = result.get(k, '')
@@ -269,16 +320,29 @@ def enrich_with_nli(result, api_key):
     result['used_nli_context'] = rag_context
     result['structured_context'] = structured_context
     
+    # 1. Parse Symptom Claims
     symptoms = [k for k, v in result.get('symptoms_dict', {}).items() if v == 1]
     symptom_claims = [s.replace('_', ' ').title() for s in symptoms] if symptoms else []
     
+    # 2. Parse Network Explanation Claims
     explanation_str = result.get('explanation', '')
     explanation_claims = [s.strip() + "." for s in explanation_str.replace('\n', ' ').split('.') if len(s.strip()) > 15]
     
-    combined_claims = symptom_claims + explanation_claims
+    # 3. Parse Treatment & Context Claims for NLI Validation
+    context_claims = []
+    for k in ['disease_description', 'treatment_plan', 'medications', 'prevention', 'next_steps']:
+        val = result.get(k, '')
+        if isinstance(val, (dict, list)): val = json.dumps(val)
+        if val:
+            sentences = [s.strip() + "." for s in str(val).replace('\n', ' ').split('.') if len(s.strip()) > 15]
+            context_claims.extend(sentences)
+            
+    combined_claims = symptom_claims + explanation_claims + context_claims
+    
     if not combined_claims or not rag_context.strip():
         result['symptoms_nli'] = [{"statement": c, "entailment_score": "Medium", "context": "No context.", "highlighted_context": ""} for c in symptom_claims]
         result['explanation_nli'] = [{"statement": c, "entailment_score": "Medium", "context": "No context.", "highlighted_context": ""} for c in explanation_claims]
+        result['context_nli'] = [{"statement": c, "entailment_score": "Medium", "context": "No context.", "highlighted_context": ""} for c in context_claims]
         return result
         
     combined_results = verify_claims_against_context(combined_claims, rag_context, api_key)
@@ -286,8 +350,8 @@ def enrich_with_nli(result, api_key):
     
     result['symptoms_nli'] = [result_dict.get(c.strip(), {"statement": c, "entailment_score": "Low", "context": "Failed map."}) for c in symptom_claims]
     result['explanation_nli'] = [result_dict.get(c.strip(), {"statement": c, "entailment_score": "Low", "context": "Failed map."}) for c in explanation_claims]
+    result['context_nli'] = [result_dict.get(c.strip(), {"statement": c, "entailment_score": "Low", "context": "Failed map."}) for c in context_claims]
     
-    # Generate verification score for UI consistency
     high_count = sum(1 for item in combined_results if item.get('entailment_score') == 'High')
     score = high_count / len(combined_results) if combined_results else 0
     
@@ -418,11 +482,10 @@ if not bn_model:
 # -------------------------------------------------------------
 st.markdown('<div class="section-header">💬 Step 1: Dynamic Symptom Assessment</div>', unsafe_allow_html=True)
 
-# Render Chat History
-for msg in st.session_state.chat_messages:
+for idx, msg in enumerate(st.session_state.chat_messages):
     with st.chat_message(msg["role"]):
         if msg.get("type") == "chart":
-            st.plotly_chart(create_probability_chart(msg["content"]), use_container_width=True)
+            st.plotly_chart(create_probability_chart(msg["content"]), use_container_width=True, key=f"chat_history_chart_{idx}")
         else:
             st.markdown(msg["content"])
 
@@ -449,21 +512,18 @@ if not st.session_state.diagnosis_complete:
                         st.session_state.collected_symptoms.update(new_syms_dict)
 
                 if st.session_state.collected_symptoms:
-                    # Show currently tracked symptoms
                     chips_html = ""
                     for sym, val in st.session_state.collected_symptoms.items():
                         c_class = "symptom-chip" if val == 1 else "symptom-chip-neg"
                         chips_html += f'<span class="{c_class}">{sym.replace("_", " ").title()}</span>'
                     st.markdown(f"**Tracked Symptoms:** <br>{chips_html}", unsafe_allow_html=True)
 
-                    # Run Bayesian Inference
                     evidence = {k: v for k, v in st.session_state.collected_symptoms.items()}
                     result = inference_engine.query(variables=['prognosis'], evidence=evidence)
                     predictions = sorted(zip(result.state_names['prognosis'], result.values), key=lambda x: x[1], reverse=True)[:5]
                     
-                    # Show Chart immediately after input
                     fig = create_probability_chart(predictions)
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=f"live_chart_{len(st.session_state.chat_messages)}")
                     st.session_state.chat_messages.append({"role": "assistant", "type": "chart", "content": predictions})
 
                     top_disease, top_prob = predictions[0]
@@ -475,7 +535,6 @@ if not st.session_state.diagnosis_complete:
                         
                         explanation = explain_prediction_str(bn_model, st.session_state.collected_symptoms, top_disease)
                         
-                        # Fetch simulated RAG context for NLI verification
                         rag_info = generate_rag_context(top_disease, api_key)
                         
                         final_result = {
@@ -508,7 +567,6 @@ if st.session_state.current_result and st.session_state.diagnosis_complete:
     st.divider()
     st.markdown('<div class="section-header">📋 Step 2: Final Diagnosis & Verification</div>', unsafe_allow_html=True)
     
-    # Prediction Block
     top_disease, top_prob = result['predictions'][0]
     conf_color = "#2E7D32" if top_prob > 0.75 else "#F57C00" if top_prob > 0.50 else "#C62828"
     
@@ -519,12 +577,34 @@ if st.session_state.current_result and st.session_state.diagnosis_complete:
     </div>
     """, unsafe_allow_html=True)
     
-    tab_explain, tab_nli = st.tabs(["💬 Network Explanation", "🔬 NLI Verification Data"])
+    tab_explain, tab_context, tab_nli = st.tabs([
+        "💬 Network Explanation", 
+        "🩺 Treatment & Context", 
+        "🔬 NLI Verification Data"
+    ])
     
     with tab_explain:
         st.info(result['explanation'])
         st.dataframe(pd.DataFrame(result['predictions'], columns=['Disease', 'Probability']).assign(Probability=lambda df: df['Probability'].apply(lambda x: f'{x*100:.2f}%')))
         
+    with tab_context:
+        st.markdown("### 📚 Disease Context & Recommendations")
+        st.markdown("---")
+        if result.get('disease_description'):
+            st.markdown(f"**📖 Overview:**\n\n{result['disease_description']}")
+            st.markdown("<br>", unsafe_allow_html=True)
+        if result.get('treatment_plan'):
+            st.markdown(f"**💊 Treatment Plan:**\n\n{result['treatment_plan']}")
+            st.markdown("<br>", unsafe_allow_html=True)
+        if result.get('medications'):
+            st.markdown(f"**💉 Medications:**\n\n{result['medications']}")
+            st.markdown("<br>", unsafe_allow_html=True)
+        if result.get('prevention'):
+            st.markdown(f"**🛡️ Prevention:**\n\n{result['prevention']}")
+            st.markdown("<br>", unsafe_allow_html=True)
+        if result.get('next_steps'):
+            st.markdown(f"**🚶 Next Steps:**\n\n{result['next_steps']}")
+
     with tab_nli:
         if 'nli_verification' in result:
             v_score = result['nli_verification']['verification_score']
@@ -539,7 +619,11 @@ if st.session_state.current_result and st.session_state.diagnosis_complete:
             </div>
             """, unsafe_allow_html=True)
             
-            categorized_nli = {"Identified Symptoms": result.get('symptoms_nli', []), "AI Explanation": result.get('explanation_nli', [])}
+            categorized_nli = {
+                "Identified Symptoms": result.get('symptoms_nli', []), 
+                "AI Explanation": result.get('explanation_nli', []),
+                "Treatment & Context": result.get('context_nli', [])
+            }
             structured_context = result.get('structured_context', {})
             source_url = result.get('source_url', '#')
             render_interactive_nli_ui(categorized_nli, structured_context, source_url)
