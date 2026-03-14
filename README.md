@@ -100,17 +100,12 @@ Create a `.env` file in the project root:
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-Or configure Streamlit secrets at `.streamlit/secrets.toml`:
-```toml
-GEMINI_API_KEY = "your_gemini_api_key_here"
-```
-
 5. **Running the Application**
 
 
 ```bash
 cd backend
- uvicorn main:app --reload  
+uvicorn main:app --reload  
 
 ```
    
@@ -121,6 +116,7 @@ Open a new terminal
 cd frontend
 cd my-app
 npm install
+npm i clsx lucide-react axios
 npm run dev
 
 ```
@@ -178,8 +174,12 @@ All 5 Symptoms Collected?
 
 ## 📝 Example Usage
 
-### Via Streamlit App
-1. Start the app: `streamlit run app.py`
+### Via Next.js and FastAPI
+1. Start the app
+- cd frontend 
+- npm run dev
+- cd backend 
+- uvicorn main:app --reload
 2. Chat with the AI to describe your symptoms
 3. Model automatically predicts disease when ready
 4. View confidence scores and probability distributions
@@ -225,7 +225,6 @@ See `requirements.txt` for complete list:
 - `pandas`: Data manipulation
 - `numpy`: Numerical computing
 - `scikit-learn`: Machine learning (Naive Bayes)
-- `streamlit`: Web interface
 - `google-generativeai`: Gemini API
 - `matplotlib`, `seaborn`: Visualization
 - `plotly`: Interactive charts
@@ -242,16 +241,13 @@ See `requirements.txt` for complete list:
 
 ### Gemini API Errors
 - Verify API key is correct and active
-- Check `.env` or Streamlit secrets configuration
+- Check `.env` 
 - Ensure sufficient API quota
 
 ### Model Loading Issues
 - Confirm `bayesian_disease_model.pkl` exists in `saved_models/`
 - Retrain model if file is corrupted: Run `bayesian_5000.ipynb`
 
-### Streamlit Connection Issues
-- Clear cache: `streamlit cache clear`
-- Restart server: Stop and run `streamlit run app.py` again
 
 ## 📚 References
 
